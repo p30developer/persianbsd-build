@@ -98,69 +98,85 @@ label="FreeBSD"
 workspace()
 {
   log "Setting up workspace and cleaning previous builds..."
-  # Unmount any existing mounts and clean up
-  umount ${packages_storage} >/dev/null 2>/dev/null || true
-  umount ${release}/dev >/dev/null 2>/dev/null || true
-  zpool destroy ghostbsd >/dev/null 2>/dev/null || true
-  umount ${release} >/dev/null 2>/dev/null || true
 
-  # Remove old build directory if it exists
-  if [ -d "${cd_root}" ] ; then
-    chflags -R noschg ${cd_root}
+  # Cleanup previous mounts
+  umount -f ${packages_storage} >/dev/null 2>/dev/null || true
+  umount -f ${release}/dev >/dev/null 2>/dev/null || true
+  umount -f ${release} >/dev/null 2>/dev/null || true
+
+  # Cleanup old zpool
+  zpool destroy persianbsd >/dev/null 2>/dev/null || true
+
+  # Remove previous cd_root
+  if [ -d "${cd_root}" ]; then
+    chflags -R noschg ${cd_root} 2>/dev/null || true
     rm -rf ${cd_root}
   fi
 
-  # Detach memory device if previously attached
+  # Detach old memory disk
   mdconfig -d -u 0 >/dev/null 2>/dev/null || true
-  
-  # Remove old pool image if it exists
-  if [ -f "${livecd}/pool.img" ] ; then
-    rm ${livecd}/pool.img
-  fi
 
-  # Create necessary directories for the build
-  mkdir -p ${livecd} ${base} ${iso} ${packages_storage}  ${release}
+  # Remove previous pool image
+  rm -f ${livecd}/pool.img
 
-  # Create a new pool image file of 6GB
-  POOL_SIZE='6g'
+  # Create workspace
+  mkdir -p \
+    ${livecd} \
+    ${base} \
+    ${iso} \
+    ${packages_storage} \
+    ${release}
+
+  # ZFS image size
+  POOL_SIZE="6g"
+
   truncate -s ${POOL_SIZE} ${livecd}/pool.img
-  
-  # Attach the pool image as a memory disk
+
+  # Attach image as md device
   mdconfig -f ${livecd}/pool.img -u 0
 
-  # Attempt to create the ZFS pool with error handling
-  if ! zpool create -O mountpoint="${release}" -O compression=zstd-9 ghostbsd /dev/md0; then
-    # Provide detailed error message in case of failure
-    echo "Error: Failed to create ZFS pool 'ghostbsd' with the following command:"
-    echo "zpool create -O mountpoint='${release}' -O compression=zstd-9 ghostbsd /dev/md0"
-    
-    # Clean up resources in case of failure
-    zpool destroy ghostbsd 2>/dev/null || true
-    mdconfig -d -u 0 2>/dev/null || true
-    rm -f ${livecd}/pool.img 2>/dev/null || true
-    
-    # Exit with an error code
-    exit 1
+  # Create build pool
+  if ! zpool create \
+      -O mountpoint="${release}" \
+      -O compression=zstd-9 \
+      persianbsd \
+      /dev/md0
+  then
+      echo "ERROR: unable to create build pool"
+
+      zpool destroy persianbsd 2>/dev/null || true
+      mdconfig -d -u 0 2>/dev/null || true
+      rm -f ${livecd}/pool.img
+
+      exit 1
   fi
 }
 
 base()
 {
   log "Installing base system packages..."
+
   base_list="$(cat "${cwd}/packages/base")"
-  vital_base="$(cat "${cwd}/packages/vital/base")"
+
   mkdir -p ${release}/etc
   cp /etc/resolv.conf ${release}/etc/resolv.conf
+
   mkdir -p ${release}/var/cache/pkg
   mount_nullfs ${packages_storage} ${release}/var/cache/pkg
-  # shellcheck disable=SC2086
-  pkg -r ${release} -R "${cwd}/pkg/" install -y -r ${PKG_CONF}_base ${base_list}
-  # shellcheck disable=SC2086
-  pkg -r ${release} -R "${cwd}/pkg/" set -y -v 1 ${vital_base}
-  rm ${release}/etc/resolv.conf
+
+  pkg -r ${release} bootstrap -f
+  pkg -r ${release} install -y ${base_list}
+
+  rm -f ${release}/etc/resolv.conf
+
   umount ${release}/var/cache/pkg
+
   touch ${release}/etc/fstab
-  mkdir -p ${release}/cdrom ${release}/mnt ${release}/media
+
+  mkdir -p \
+      ${release}/cdrom \
+      ${release}/mnt \
+      ${release}/media
 }
 
 set_ghostbsd_version()
