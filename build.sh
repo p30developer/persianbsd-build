@@ -30,7 +30,7 @@ help_function()
    exit 1 # Exit script after printing help
 }
 # Set mate and release to be default
-export desktop="mate"
+export desktop="plasma"
 export build_type="release"
 
 while getopts "d:b:h" opt
@@ -80,20 +80,20 @@ else
   community=""
 fi
 
-workdir="/usr/local"
-livecd="${workdir}/ghostbsd-build"
+workdir="/var/local"
+livecd="${workdir}/freebsd-build"
 base="${livecd}/base"
 iso="${livecd}/iso"
 packages_storage="${livecd}/packages"
 release="${livecd}/release"
 export release
 cd_root="${livecd}/cd_root"
-live_user="ghostbsd"
+live_user="freebsd"
 export live_user
 
 time_stamp=""
 release_stamp=""
-label="GhostBSD"
+label="FreeBSD"
 
 workspace()
 {
