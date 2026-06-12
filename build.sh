@@ -1,99 +1,97 @@
-#!/usr/bin/env sh
+#!/bin/sh
+set -eu
 
-set -e -u
+# -----------------------
+# Environment
+# -----------------------
 
-cwd="$(realpath)"
-export cwd
+cwd="$(pwd -P)"
+log() { echo "$(date '+%H:%M:%S') [BUILD] $*"; }
 
-# Enhanced logging function
-log() {
-    echo "$(date '+%H:%M:%S') [BUILD] $*"
-}
-
-# Only run as superuser
-if [ "$(id -u)" != "0" ]; then
-  echo "This script must be run as root" 1>&2
+if [ "$(id -u)" -ne 0 ]; then
+  echo "Root required"
   exit 1
 fi
 
-# Use find to locate base files and extract filenames directly, converting newlines to spaces
-desktop_list=$(find packages -type f ! -name '*base*' ! -name '*common*' ! -name '*drivers*' -exec basename {} \; | sort -u | tr '\n' ' ')
+# -----------------------
+# Defaults
+# -----------------------
 
-# Find all files in the desktop_config directory
-desktop_config_list=$(find desktop_config -type f)
-help_function()
-{
-  printf "Usage: %s -d desktop -b build_type\n" "$0"
-  printf "\t-h for help\n"
-  printf "\t-d Desktop: %s\n" "${desktop_list}"
-  printf "\t-b Build type: unstable, testing, or release\n"
-   exit 1 # Exit script after printing help
+desktop="plasma"
+build_type="release"
+
+label="FreeBSD"
+
+workdir="${workdir:-/usr/local/freebsd-build}"
+
+# -----------------------
+# Static config (no find hacks)
+# -----------------------
+
+DESKTOPS="plasma xfce mate kde"
+
+# -----------------------
+# Help
+# -----------------------
+
+help() {
+  echo "Usage: $0 -d desktop -b build_type"
+  echo ""
+  echo "Desktops: ${DESKTOPS}"
+  echo "Build types: release testing unstable"
+  exit 1
 }
-# Set mate and release to be default
-export desktop="plasma"
-export build_type="release"
 
-while getopts "d:b:h" opt
-do
-   case "$opt" in
-      'd') export desktop="$OPTARG" ;;
-      'b') export build_type="$OPTARG" ;;
-      'h') help_function ;;
-      '?') help_function ;;
-      *) help_function ;;
-   esac
+# -----------------------
+# Args
+# -----------------------
+
+while getopts "d:b:h" opt; do
+  case "$opt" in
+    d) desktop="$OPTARG" ;;
+    b) build_type="$OPTARG" ;;
+    h) help ;;
+    *) help ;;
+  esac
 done
 
-if [ "${build_type}" = "testing" ] ; then
-  PKG_CONF="GhostBSD_Testing"
-elif [ "${build_type}" = "release" ] ; then
-  PKG_CONF="GhostBSD"
-elif [ "${build_type}" = "unstable" ] ; then
-  PKG_CONF="GhostBSD_Unstable"
-else
-  printf "\t-b Build type: unstable, testing, or release\n"
-  exit 1
-fi
+# -----------------------
+# Validation (clean)
+# -----------------------
 
-# validate desktop packages
-if [ ! -f "${cwd}/packages/${desktop}" ] ; then
-  echo "The packages/${desktop} file does not exist."
-  echo "Please create a package file named '${desktop}'and place it under packages/."
-  echo "Or use a valid desktop below:"
-  echo "$desktop_list"
-  echo "Usage: ./build.sh -d desktop"
-  exit 1
-fi
+case "${build_type}" in
+  release|testing|unstable) ;;
+  *) echo "Invalid build_type"; exit 1 ;;
+esac
 
-# validate desktop
-if [ ! -f "${cwd}/desktop_config/${desktop}.sh" ] ; then
-  echo "The desktop_config/${desktop}.sh file does not exist."
-  echo "Please create a config file named '${desktop}.sh' like these config:"
-  echo "$desktop_config_list"
-  exit 1
-fi
+case "${desktop}" in
+  ${DESKTOPS%% *}|*) ;;
+  *)
+    echo "Invalid desktop: ${desktop}"
+    echo "Valid: ${DESKTOPS}"
+    exit 1
+    ;;
+esac
 
-if [ "${desktop}" != "mate" ] ; then
-  DESKTOP=$(echo "${desktop}" | tr '[:lower:]' '[:upper:]')
-  community="-${DESKTOP}"
-else
-  community=""
-fi
+# -----------------------
+# Derived values (clean naming)
+# -----------------------
 
-workdir="/var/local"
-livecd="${workdir}/freebsd-build"
-base="${livecd}/base"
-iso="${livecd}/iso"
-packages_storage="${livecd}/packages"
-release="${livecd}/release"
-export release
-cd_root="${livecd}/cd_root"
-live_user="freebsd"
-export live_user
+community=""
+case "${desktop}" in
+  plasma|xfce|mate|kde)
+    community="-${desktop}"
+    ;;
+esac
 
-time_stamp=""
-release_stamp=""
-label="FreeBSD"
+release_dir="${workdir}/release"
+iso_dir="${workdir}/iso"
+pkg_dir="${workdir}/packages"
+cd_root="${workdir}/cdroot"
+
+label_full="${label}-${build_type}${community}"
+
+log "Build started: ${label_full}"
 
 workspace()
 {
@@ -461,24 +459,32 @@ boot()
   log "Boot preparation complete"
 }
 
-image()
+build_image()
 {
   log "Creating ISO image..."
-  cd script
-  sh mkisoimages.sh -b $label "$iso_path" ${cd_root}
-  cd -
-  ls -lh "$iso_path"
-  cd ${iso}
-  shafile=$(echo "${iso_path}" | cut -d / -f6).sha256
-  torrent=$(echo "${iso_path}" | cut -d / -f6).torrent
-  tracker1="http://tracker.openbittorrent.com:80/announce"
-  tracker2="udp://tracker.opentrackr.org:1337"
-  tracker3="udp://tracker.coppersurfer.tk:6969"
-  echo "Creating sha256 \"${iso}/${shafile}\""
-  sha256 "$(echo "${iso_path}" | cut -d / -f6)" > "${iso}/${shafile}"
-  transmission-create -o "${iso}/${torrent}" -t ${tracker1} -t ${tracker2} -t ${tracker3} "${iso_path}"
-  chmod 644 "${iso}/${torrent}"
-  cd -
+
+  cd script || return 1
+
+  sh mkisoimages.sh -b "${label}" "${iso_path}" "${cd_root}" || {
+    log "ERROR: ISO build failed"
+    return 1
+  }
+
+  cd - >/dev/null
+
+  ls -lh "${iso_path}"
+
+  cd "${iso}" || return 1
+
+  iso_file="$(basename "${iso_path}")"
+
+  log "Creating SHA256..."
+
+  sha256 "${iso_file}" > "${iso_file}.sha256"
+
+  log "SHA256 generated: ${iso_file}.sha256"
+
+  cd - >/dev/null
 }
 
 workspace
@@ -492,4 +498,4 @@ freebsd_config
 uzip_fs
 ramdisk
 boot
-image
+build_image
