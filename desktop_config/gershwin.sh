@@ -9,21 +9,22 @@ set -e -u
 
 lightdm_setup()
 {
-  sed -i '' "s@#greeter-session=example-gtk-gnome@greeter-session=slick-greeter@" "${release}/usr/local/etc/lightdm/lightdm.conf"
-  sed -i '' "s@#user-session=default@user-session=gershwin@" "${release}/usr/local/etc/lightdm/lightdm.conf"
+  sed -i '' 's@#greeter-session=.*@greeter-session=slick-greeter@' \
+    "${release}/usr/local/etc/lightdm/lightdm.conf"
+
+  sed -i '' 's@#user-session=.*@user-session=xfce@' \
+    "${release}/usr/local/etc/lightdm/lightdm.conf"
 }
 
 setup_xinit()
 {
-  chroot "${release}" su "${live_user}" -c "echo 'exec /System/Library/Scripts/Gershwin.sh' > /Local/Users/${live_user}/.xinitrc"
-  echo "exec /System/Library/Scripts/Gershwin.sh" > "${release}/root/.xinitrc"
-  echo "exec /System/Library/Scripts/Gershwin.sh" > "${release}/usr/share/skel/dot.xinitrc"
+  chroot "${release}" su "${live_user}" -c "echo 'exec startxfce4' > /home/${live_user}/.xinitrc"
+  echo 'exec startxfce4' > "${release}/root/.xinitrc"
+  echo 'exec startxfce4' > "${release}/usr/share/skel/dot.xinitrc"
 }
 
 patch_etc_files
 patch_loader_conf_d
-community_setup_liveuser_gershwin
-community_setup_autologin_gershwin
 lightdm_setup
 setup_xinit
 final_setup
