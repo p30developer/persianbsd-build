@@ -179,91 +179,153 @@ base()
       ${release}/media
 }
 
-set_ghostbsd_version()
+set_freebsd_version()
 {
-  log "Setting GhostBSD version..."
-  if [ "${build_type}" = "testing" ] || [ "${build_type}" = "unstable" ] ; then
-    # Add date suffix for testing and unstable builds
-    base_version="-$(cat ${release}/etc/version)"
-    date_suffix="-$(date +%m-%d-%H-%M)"
-    version="${base_version}${date_suffix}"
-    log "Adding date suffix for ${build_type} build: ${date_suffix}"
-  else
-    version="-$(cat ${release}/etc/version)"
+  log "Setting system version..."
+
+  version_file="${release}/etc/version"
+
+  if [ ! -f "${version_file}" ]; then
+    log "ERROR: version file not found: ${version_file}"
+    return 1
   fi
-  iso_path="${iso}/${label}${version}${release_stamp}${time_stamp}${community}.iso"
+
+  base_version="$(cat "${version_file}")"
+
+  if [ "${build_type}" = "testing" ] || [ "${build_type}" = "unstable" ]; then
+    date_suffix="$(date +%Y%m%d-%H%M)"
+    version="${base_version}-${build_type}${date_suffix}"
+    log "Testing/unstable build: ${version}"
+  else
+    version="${base_version}"
+  fi
+
+  iso_path="${iso}/${label}-${version}-${release_stamp}-${time_stamp}${community}.iso"
+
+  log "ISO path set to: ${iso_path}"
 }
+
 
 packages_software()
 {
   log "Installing desktop packages (${desktop})..."
-  if [ "${build_type}" = "unstable" ] ; then
-    cp pkg/GhostBSD_Unstable.conf ${release}/etc/pkg/GhostBSD.conf
+
+  pkg_conf="${release}/etc/pkg/FreeBSD.conf"
+
+  if [ "${build_type}" = "unstable" ]; then
+    cp pkg/FreeBSD_Unstable.conf "${pkg_conf}"
+  elif [ "${build_type}" = "testing" ]; then
+    cp pkg/FreeBSD_Testing.conf "${pkg_conf}"
+  else
+    cp pkg/FreeBSD_Release.conf "${pkg_conf}"
   fi
-  if [ "${build_type}" = "testing" ] ; then
-    cp pkg/GhostBSD_Testing.conf ${release}/etc/pkg/GhostBSD.conf
-  fi
-  cp /etc/resolv.conf ${release}/etc/resolv.conf
-  mkdir -p ${release}/var/cache/pkg
-  mount_nullfs ${packages_storage} ${release}/var/cache/pkg
-  mount -t devfs devfs ${release}/dev
-  de_packages="$(cat "${cwd}/packages/${desktop}")"
-  common_packages="$(cat "${cwd}/packages/common")"
-  drivers_packages="$(cat "${cwd}/packages/drivers")"
-  vital_de_packages="$(cat "${cwd}/packages/vital/${desktop}")"
-  vital_common_packages="$(cat "${cwd}/packages/vital/common")"
-  # shellcheck disable=SC2086
-  pkg -c ${release} install -y ${de_packages} ${common_packages} ${drivers_packages}
-  # shellcheck disable=SC2086
-  pkg -c ${release} set -y -v 1 ${vital_de_packages}  ${vital_common_packages}
-  mkdir -p ${release}/proc
-  mkdir -p ${release}/compat/linux/proc
-  rm ${release}/etc/resolv.conf
-  umount ${release}/var/cache/pkg
+
+  mkdir -p "${release}/etc"
+  echo "nameserver 1.1.1.1" > "${release}/etc/resolv.conf"
+
+  mkdir -p "${release}/var/cache/pkg"
+  mount_nullfs "${packages_storage}" "${release}/var/cache/pkg"
+
+  mount -t devfs devfs "${release}/dev"
+
+  de_packages=$(tr '\n' ' ' < "${cwd}/packages/${desktop}")
+  common_packages=$(tr '\n' ' ' < "${cwd}/packages/common")
+  drivers_packages=$(tr '\n' ' ' < "${cwd}/packages/drivers")
+
+  vital_de_packages=$(tr '\n' ' ' < "${cwd}/packages/vital/${desktop}")
+  vital_common_packages=$(tr '\n' ' ' < "${cwd}/packages/vital/common")
+
+  pkg -c "${release}" update -f
+
+  pkg -c "${release}" install -y \
+    ${de_packages} \
+    ${common_packages} \
+    ${drivers_packages}
+
+  pkg -c "${release}" set -y -v 1 \
+    ${vital_de_packages} \
+    ${vital_common_packages}
+
+  rm -f "${release}/etc/resolv.conf"
+
+  umount "${release}/var/cache/pkg" || true
+  umount "${release}/dev" || true
 }
+
 
 fetch_x_drivers_packages()
 {
   log "Fetching X drivers packages..."
-  if [ "${build_type}" = "release" ] ; then
-    pkg_url=$(pkg -R pkg/ -vv | grep '/stable.*/latest' | cut -d '"' -f2)
-  elif [ "${build_type}" = "testing" ]; then
-    pkg_url=$(pkg -R pkg/ -vv | grep '/testing.*/latest' | cut -d '"' -f2)
-  else
-    pkg_url=$(pkg -R pkg/ -vv | grep '/unstable.*/latest' | cut -d '"' -f2)
-  fi
-  mkdir ${release}/xdrivers
-  yes | pkg -R "${cwd}/pkg/" update -r ${PKG_CONF}
-  echo """$(pkg -R "${cwd}/pkg/" rquery -x -r ${PKG_CONF} '%n %n-%v.pkg' 'xlibre-nvidia-driver|nvidia-kmod|egl-x11' | grep -v -E 'libva|304|devel')""" > ${release}/xdrivers/drivers-list
-  pkg_list="""$(pkg -R "${cwd}/pkg/" rquery -x -r ${PKG_CONF} '%n-%v.pkg' 'xlibre-nvidia-driver|nvidia-kmod|egl-x11' | grep -v -E 'libva|304|devel')"""
-  for line in $pkg_list ; do
-    fetch -o ${release}/xdrivers "${pkg_url}/All/$line"
+
+  case "${build_type}" in
+    release)
+      repo_type="stable"
+      ;;
+    testing)
+      repo_type="testing"
+      ;;
+    *)
+      repo_type="unstable"
+      ;;
+  esac
+
+  mkdir -p "${release}/xdrivers"
+
+  # update repo metadata (safe way)
+  pkg -c "${release}" update -f
+
+  # query packages once
+  pkg_list=$(pkg -c "${release}" rquery -x \
+    '%n-%v' \
+    'xlibre-nvidia-driver|nvidia-kmod|egl-x11' \
+    | grep -v -E 'libva|304|devel')
+
+  echo "${pkg_list}" > "${release}/xdrivers/drivers-list"
+
+  # instead of manual fetch → use pkg fetch (correct tool)
+  for pkgname in ${pkg_list}; do
+    pkg -c "${release}" fetch -y -o "${release}/xdrivers" "${pkgname}"
   done
-  ls ${release}/xdrivers
+
+  ls -lah "${release}/xdrivers"
 }
 
 rc()
 {
   log "Configuring rc settings..."
-  chroot ${release} touch /etc/rc.conf
-  chroot ${release} sysrc hostname='livecd'
-  chroot ${release} sysrc zfs_enable="YES"
-  chroot ${release} sysrc kld_list="linux linux64 cuse fusefs hgame"
-  chroot ${release} sysrc linux_enable="YES"
-  chroot ${release} sysrc devfs_enable="YES"
-  chroot ${release} sysrc devfs_system_ruleset="devfsrules_common"
-  chroot ${release} sysrc moused_enable="YES"
-  chroot ${release} sysrc dbus_enable="YES"
-  chroot ${release} sysrc lightdm_enable="NO"
-  chroot ${release} sysrc webcamd_enable="YES"
-  chroot ${release} sysrc firewall_enable="YES"
-  chroot ${release} sysrc firewall_type="workstation"
-  chroot ${release} sysrc cupsd_enable="YES"
-  chroot ${release} sysrc avahi_daemon_enable="YES"
-  chroot ${release} sysrc avahi_dnsconfd_enable="YES"
-  chroot ${release} sysrc ntpd_enable="YES"
-  chroot ${release} sysrc ntpd_sync_on_start="YES"
-  chroot ${release} sysrc clear_tmp_enable="YES"
+
+  chroot "${release}" sysrc hostname="livecd"
+
+  # Core system services
+  chroot "${release}" sysrc devfs_enable="YES"
+  chroot "${release}" sysrc devfs_system_ruleset="devfsrules_common"
+
+  chroot "${release}" sysrc zfs_enable="YES"
+
+  # Optional compatibility layer (not forced)
+  chroot "${release}" sysrc linux_enable="YES"
+  chroot "${release}" sysrc kld_list="linux linux64 cuse fusefs"
+
+  # Desktop services (profile-based, not base)
+  chroot "${release}" sysrc dbus_enable="YES"
+  chroot "${release}" sysrc moused_enable="YES"
+
+  # Printing / discovery
+  chroot "${release}" sysrc cupsd_enable="YES"
+  chroot "${release}" sysrc avahi_daemon_enable="YES"
+  chroot "${release}" sysrc avahi_dnsconfd_enable="YES"
+
+  # Time sync (modern safe default)
+  chroot "${release}" sysrc ntpd_enable="YES"
+
+  # Security
+  chroot "${release}" sysrc firewall_enable="YES"
+  chroot "${release}" sysrc firewall_type="workstation"
+
+  # Cleanup
+  chroot "${release}" sysrc clear_tmp_enable="YES"
+
+  log "rc configuration complete"
 }
 
 ghostbsd_config()
@@ -368,7 +430,7 @@ image()
 
 workspace
 base
-set_ghostbsd_version
+set_freebsd_version
 packages_software
 fetch_x_drivers_packages
 rc
