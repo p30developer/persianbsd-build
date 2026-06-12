@@ -328,20 +328,26 @@ rc()
   log "rc configuration complete"
 }
 
-ghostbsd_config()
+freebsd_config()
 {
-  log "Applying GhostBSD configuration..."
-  # echo "gop set 0" >> ${release}/boot/loader.rc.local
-  mkdir -p ${release}/usr/local/share/ghostbsd
-  echo "${desktop}" > ${release}/usr/local/share/ghostbsd/desktop
-  # Mkdir for linux compat to ensure /etc/fstab can mount when booting LiveCD
-  chroot ${release} mkdir -p /compat/linux/dev/shm
-  chroot ${release} mkdir -p /compat/linux/proc
-  chroot ${release} mkdir -p /compat/linux/sys
-  # Add /boot/entropy file
-  chroot ${release} touch /boot/entropy
-  # default GhostBSD to local time instead of UTC
-  chroot ${release} touch /etc/wall_cmos_clock
+  log "Applying system configuration..."
+
+  # Desktop profile marker (generic, not GhostBSD)
+  mkdir -p "${release}/usr/local/share/desktop"
+  echo "${desktop}" > "${release}/usr/local/share/desktop/current"
+
+  # Linux compatibility filesystem (optional layer)
+  chroot "${release}" mkdir -p /compat/linux/dev/shm
+  chroot "${release}" mkdir -p /compat/linux/proc
+  chroot "${release}" mkdir -p /compat/linux/sys
+
+  # Boot entropy seed (optional, harmless legacy compatibility)
+  chroot "${release}" touch /boot/entropy || true
+
+  # Clock behavior (ONLY if you want Windows dual boot friendliness)
+  # chroot "${release}" touch /etc/wall_cmos_clock
+
+  log "System configuration complete"
 }
 
 desktop_config()
@@ -351,61 +357,108 @@ desktop_config()
   sh "${cwd}/desktop_config/${desktop}.sh"
 }
 
-uzip()
+uzip_fs()
 {
-  log "Creating compressed uzip filesystem..."
-  install -o root -g wheel -m 755 -d "${cd_root}"
-  mkdir "${cd_root}/data"
-  zfs snapshot ghostbsd@clean
-  zfs send -p -c -e ghostbsd@clean | dd of=/usr/local/ghostbsd-build/cd_root/data/system.img status=progress bs=1M
+  log "Creating ZFS root snapshot image..."
+
+  dataset="${1:-freebsd}"
+  snap="${dataset}@clean"
+
+  if ! zfs list "${dataset}" >/dev/null 2>&1; then
+    log "ERROR: dataset ${dataset} not found"
+    return 1
+  fi
+
+  # create snapshot safely
+  zfs snapshot -r "${snap}"
+
+  install -o root -g wheel -d "${cd_root}/data"
+
+  output="${cd_root}/data/system.zfs"
+
+  # export snapshot
+  zfs send -R -c "${snap}" > "${output}"
+
+  log "ZFS image created at: ${output}"
 }
 
 ramdisk()
 {
-  log "Creating ramdisk..."
+  log "Creating ramdisk image..."
+
   ramdisk_root="${cd_root}/data/ramdisk"
   mkdir -p "${ramdisk_root}"
-  cd "${release}"
-  tar -cf - rescue | tar -xf - -C "${ramdisk_root}"
-  cd "${cwd}"
-  install -o root -g wheel -m 755 "init.sh.in" "${ramdisk_root}/init.sh"
-  sed "s/@VOLUME@/GHOSTBSD/" "init.sh.in" > "${ramdisk_root}/init.sh"
-  mkdir "${ramdisk_root}/dev"
-  mkdir "${ramdisk_root}/etc"
+
+  # safer copy of rescue
+  (cd "${release}" && tar -cf - rescue) | tar -xf - -C "${ramdisk_root}"
+
+  # init script (no branding)
+  sed "s/@VOLUME@/FREEBSD-LIVE/" init.sh.in > "${ramdisk_root}/init.sh"
+  chmod 755 "${ramdisk_root}/init.sh"
+
+  # minimal filesystem structure
+  mkdir -p "${ramdisk_root}/dev"
+  mkdir -p "${ramdisk_root}/etc"
   touch "${ramdisk_root}/etc/fstab"
-  install -o root -g wheel -m 755 "rc.in" "${ramdisk_root}/etc/rc"
-  cp ${release}/etc/login.conf ${ramdisk_root}/etc/login.conf
-  makefs -b '10%' "${cd_root}/data/ramdisk.ufs" "${ramdisk_root}"
-  gzip "${cd_root}/data/ramdisk.ufs"
+
+  install -o root -g wheel -m 755 rc.in "${ramdisk_root}/etc/rc"
+
+  cp "${release}/etc/login.conf" "${ramdisk_root}/etc/login.conf"
+
+  # create filesystem image
+  makefs -b 10% "${cd_root}/data/ramdisk.ufs" "${ramdisk_root}"
+
+  gzip -f "${cd_root}/data/ramdisk.ufs"
+
   rm -rf "${ramdisk_root}"
+
+  log "ramdisk created successfully"
 }
 
 boot()
 {
   log "Preparing boot files..."
-  cd "${release}"
-  tar -cf - boot | tar -xf - -C "${cd_root}"
-  cp COPYRIGHT ${cd_root}/COPYRIGHT
-  cd "${cwd}"
-  cp LICENSE ${cd_root}/LICENSE
-  cp -R boot/ ${cd_root}/boot/
-  mkdir ${cd_root}/etc
 
-  # Try to unmount dev and release if mounted
-  umount ${release}/dev >/dev/null 2>/dev/null || true
-  umount ${release} >/dev/null 2>/dev/null || true
-  
-  # Export ZFS pool and ensure it's clean
-  zpool export ghostbsd
+  cd "${release}"
+
+  # safer boot copy (no duplication)
+  tar -cf - boot | tar -xf - -C "${cd_root}"
+
+  cp COPYRIGHT "${cd_root}/COPYRIGHT"
+  cp "${cwd}/LICENSE" "${cd_root}/LICENSE"
+
+  mkdir -p "${cd_root}/etc"
+
+  # cleanup mounts safely
+  if mount | grep -q "${release}/dev"; then
+    umount "${release}/dev" || log "Warning: dev unmount failed"
+  fi
+
+  if mount | grep -q "${release}"; then
+    umount "${release}" || log "Warning: release unmount failed"
+  fi
+
+  # ZFS export (parameterized)
+  zpool_name="${zpool_name:-ghostbsd}"
+
+  zpool export "${zpool_name}" || {
+    log "ERROR: failed to export zpool ${zpool_name}"
+    return 1
+  }
+
+  # wait loop with timeout
   timeout=10
-  while zpool status ghostbsd >/dev/null 2>&1; do
+  while zpool list "${zpool_name}" >/dev/null 2>&1; do
     sleep 1
     timeout=$((timeout - 1))
-    if [ $timeout -eq 0 ]; then
-      echo "Failed to cleanly export ZFS pool within timeout"
+
+    if [ "${timeout}" -le 0 ]; then
+      log "ERROR: timeout exporting zpool ${zpool_name}"
       break
     fi
   done
+
+  log "Boot preparation complete"
 }
 
 image()
@@ -435,8 +488,8 @@ packages_software
 fetch_x_drivers_packages
 rc
 desktop_config
-ghostbsd_config
-uzip
+freebsd_config
+uzip_fs
 ramdisk
 boot
 image
